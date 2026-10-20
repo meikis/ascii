@@ -770,7 +770,7 @@ export class Surface {
 
 const CATEGORIES: readonly Category[] = ["scenes", "shapes", "space", "physics", "nature", "creatures", "objects", "generative", "effects", "ui", "data", "type", "logos", "companies", "distros"];
 /** The largest a piece may be: a scene's size. The library's own pieces other than scenes keep to 80 by 32. */
-export const MAX = { cols: 320, rows: 120 } as const;
+export const MAX = { cols: 960, rows: 540 } as const;
 
 /**
  * Checks a meta as scripts/check.ts checks a library piece's, and throws, saying what to change, for the first thing

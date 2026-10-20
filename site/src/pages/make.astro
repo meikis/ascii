@@ -58,7 +58,7 @@ const glyphs = await glyphShapes();
       <span><input id="name" type="text" maxlength="32" autocomplete="off" spellcheck="false" value="my logo" /></span>
 
       <label for="width">width</label>
-      <span><input id="width" type="number" min="16" max={LIMIT.cols} step="1" value="64" inputmode="numeric" /> columns, at most {LIMIT.cols}</span>
+      <span><input id="width" type="number" min="16" max={LIMIT.cols} step="1" value="160" inputmode="numeric" /> columns, at most {LIMIT.cols}</span>
 
       <span class="label" id="style-label">style</span>
       <span class="choice" role="group" aria-labelledby="style-label">
@@ -86,7 +86,7 @@ const glyphs = await glyphShapes();
     </p>
     <p class="muted note">
       A company or a language glints, as the library's logos do; a distro has a scan line run down it. The width is the most columns it may take;
-      a tall logo takes fewer, since a piece is at most {LIMIT.rows} rows.
+      a tall logo takes fewer, since a piece is at most {LIMIT.rows} rows. for a photo, try a width of 200 or more.
     </p>
   </section>
 
@@ -308,7 +308,7 @@ const glyphs = await glyphShapes();
 
 <script>
   import { mount, names, type Piece } from "ascii.rest";
-  import { draw, isSvg, raster, render, type Drawing, type Glyph, type Source, type Style } from "../lib/logo";
+  import { draw, isSvg, LIMIT, raster, render, type Drawing, type Glyph, type Source, type Style } from "../lib/logo";
   import { about, clean, embed, picture, piece, source, type Kind, type Settings } from "../lib/logo-file";
   import { paint } from "../lib/paint";
   import { svgOf } from "../lib/svg";
@@ -352,7 +352,7 @@ const glyphs = await glyphShapes();
       timer = window.setTimeout(fn, ms);
     };
   };
-  const width = () => Math.max(16, Math.min(80, Math.round(+widthInput.value) || 64));
+  const width = () => Math.max(16, Math.min(LIMIT.cols, Math.round(+widthInput.value) || 160));
   const settings = (): Settings => ({ proper: nameInput.value, file, category, every: +everyInput.value || 5 });
 
   // An image's name without its extension, as the piece's name, unless the reader typed one.

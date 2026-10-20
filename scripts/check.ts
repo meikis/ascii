@@ -83,7 +83,7 @@ for (const slug of slugs) {
     if (typeof m.note !== "string" || m.note.length > 72 || !m.note) errors.push("meta.note must be 1-72 chars");
     // Scenes are wide, dense, coloured pictures; everything else is a small mono piece.
     const scene = m.category === "scenes";
-    const [maxCols, maxRows] = scene ? [320, 120] : [80, 32];
+    const [maxCols, maxRows] = scene ? [960, 540] : [80, 32];
     if (!Number.isInteger(m.cols) || m.cols < 1 || m.cols > maxCols) errors.push(`meta.cols must be an integer 1-${maxCols}`);
     if (!Number.isInteger(m.rows) || m.rows < 1 || m.rows > maxRows) errors.push(`meta.rows must be an integer 1-${maxRows}`);
     if (!Number.isInteger(m.fps) || m.fps < 0 || m.fps > 60) errors.push("meta.fps must be an integer 0-60");

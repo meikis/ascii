@@ -29,7 +29,7 @@ export const FILL = "8";
 // No backtick, so the art can sit in a String.raw template in the piece's source.
 export const EDGE = ".,:'\"^-_~=/\\|()dbqpPYoO08";
 /** The contract's limit for a piece that is not a scene. */
-export const LIMIT = { cols: 80, rows: 32 };
+export const LIMIT = { cols: 960, rows: 540 };
 const MARGIN = { x: 2, y: 1 };
 const SIDE = 2400; // pixels across the first drawing, the longer way
 const SVG_NS = "http://www.w3.org/2000/svg";
