@@ -139,7 +139,7 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
   <form class="maker" data-maker hidden>
     <p class="field">
       <label for="banner-text">text</label>
-      <input id="banner-text" class="line" name="text" value={text} maxlength={MAX} autocomplete="off" autocapitalize="none" spellcheck="false" />
+      <input id="banner-text" class="line" name="text" value={text} maxlength={MAX} autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="any language: english, 中文, 日本語, 한국어, deutsch…" />
       <span class="left muted" role="status"></span>
     </p>
     <p class="field">
@@ -271,7 +271,9 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
 
 <script>
   import { paint } from "../lib/paint";
-  import { inkOf, namespaced } from "ascii.rest/svg";
+  import { inkOf, namespaced, bannerSvg } from "ascii.rest/svg";
+  import { fonts as builtInFonts } from "ascii.rest/banner";
+  import { rasterFont } from "../lib/multi-font";
   import {
     PLAIN,
     artDark,
@@ -289,6 +291,10 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
     readmeBanner,
     svgBanner,
     terminalBanner,
+    FILLS,
+    SPEEDS,
+    SCALE,
+    FPS,
     type Ink,
     type Look,
   } from "../lib/banner";
@@ -385,10 +391,18 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
   let turn = 0;
   const show = async () => {
     const mine = ++turn;
-    const text = clean(input.value, look.font);
+    // For multi-language text (Chinese, Japanese, Korean, etc.), don't filter
+    // with clean() — it would strip characters not in the built-in font.
+    const raw = input.value;
+    const builtIn0 = builtInFonts[look.font as keyof typeof builtInFonts];
+    const hasNonAscii0 = [...raw].some((ch) => {
+      const c = builtIn0.cased ? ch : ch.toUpperCase();
+      return !/\s/.test(ch) && !Object.hasOwn(builtIn0.glyphs, c);
+    });
+    const text = hasNonAscii0 ? raw.trim().replace(/\s+/g, " ") : clean(raw, look.font);
     look.tagline = cleanTagline(tagline.value);
-    // what the font has no letter for, said once each
-    const out = [...new Set([...input.value].filter((ch) => !/\s/.test(ch) && !clean(ch, look.font)))].join(" ");
+    // what the font has no letter for, said once each (skip for multi-language)
+    const out = hasNonAscii0 ? "" : [...new Set([...raw].filter((ch) => !/\s/.test(ch) && !clean(ch, look.font)))].join(" ");
     left.textContent = [out && `left out: ${out}`, linkNote].filter(Boolean).join(". ");
     linkNote = "";
     mark();
@@ -409,7 +423,39 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
       left.textContent = `couldn't load the ${select.selectedOptions[0]?.textContent ?? want} logo: try again, or pick another`;
       return;
     }
-    const svgs = images.map((img, i) => banner(text, { dark: img.dataset.groundImg === "dark", look, art: pieces[i] })!.svg);
+    // Check if text has characters the built-in font can't draw.
+    const fontName = look.font;
+    const builtIn = builtInFonts[fontName as keyof typeof builtInFonts];
+    const hasNonAscii = [...text].some((ch) => {
+      const c = builtIn.cased ? ch : ch.toUpperCase();
+      return !/\s/.test(ch) && !Object.hasOwn(builtIn.glyphs, c);
+    });
+
+    let svgs: string[];
+    if (hasNonAscii) {
+      // Multi-language: rasterise the text into a custom font.
+      const customFont = rasterFont(text, { height: 7 });
+      svgs = images.map((img) => {
+        const dark = img.dataset.groundImg === "dark";
+        return bannerSvg(text, {
+          dark,
+          font: customFont as any,
+          shadow: look.shadow,
+          fill: look.fill === PLAIN.fill ? undefined : FILLS[look.fill],
+          effect: look.effect,
+          speed: SPEEDS[look.speed],
+          color: look.color === "art" ? (pieces[0] ? "art" : undefined) : (look.color ?? undefined),
+          tagline: look.tagline,
+          art: look.art && pieces[0] ? { svg: pieces[0] } : null,
+          place: look.place,
+          background: look.bg ?? undefined,
+          scale: SCALE[look.size],
+          fps: FPS[look.speed],
+        });
+      });
+    } else {
+      svgs = images.map((img, i) => banner(text, { dark: img.dataset.groundImg === "dark", look, art: pieces[i] })!.svg);
+    }
     urls.splice(0).forEach((url) => URL.revokeObjectURL(url));
     images.forEach((img, i) => {
       const url = URL.createObjectURL(new Blob([svgs[i]], { type: "image/svg+xml" }));
