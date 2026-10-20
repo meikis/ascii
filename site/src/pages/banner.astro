@@ -146,6 +146,11 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
       <label for="banner-tagline">tagline</label>
       <input id="banner-tagline" class="line wide" name="tagline" maxlength={TAGLINE} placeholder="a line under it, typed out" autocomplete="off" />
     </p>
+    <p class="field">
+      <label for="banner-family">font face</label>
+      <input id="banner-family" class="line" name="family" placeholder="a local font for other languages, e.g. SimHei, Microsoft YaHei, Noto Sans JP" autocomplete="off" />
+      <span class="left muted" role="status">for multi-language text, leave blank for auto</span>
+    </p>
     <p class="field" role="group" aria-label="colour of the letters">
       <span class="label">colour</span>
       <button class="button pick" type="button" data-colour="" aria-pressed="true"><span>github</span></button>
@@ -302,6 +307,7 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
   const form = document.querySelector<HTMLFormElement>("[data-maker]")!;
   const input = form.querySelector<HTMLInputElement>("#banner-text")!;
   const tagline = form.querySelector<HTMLInputElement>("#banner-tagline")!;
+  const familyInput = form.querySelector<HTMLInputElement>("#banner-family")!;
   const left = form.querySelector<HTMLElement>(".left")!;
   const select = form.querySelector<HTMLSelectElement>("#banner-art")!;
   const colours = [...form.querySelectorAll<HTMLButtonElement>("[data-colour]")];
@@ -434,7 +440,7 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
     let svgs: string[];
     if (hasNonAscii) {
       // Multi-language: rasterise the text into a custom font.
-      const customFont = rasterFont(text, { height: 7 });
+      const customFont = rasterFont(text, { fontFamily: familyInput.value.trim() || undefined });
       svgs = images.map((img) => {
         const dark = img.dataset.groundImg === "dark";
         return bannerSvg(text, {
@@ -512,6 +518,7 @@ for (const way of ways) if (way.lang) way.html = await highlight(way.code, way.l
 
   input.addEventListener("input", show);
   tagline.addEventListener("input", show);
+  familyInput.addEventListener("input", show);
   form.addEventListener("submit", (e) => e.preventDefault());
   colours.forEach((b) =>
     b.addEventListener("click", () => {

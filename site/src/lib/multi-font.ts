@@ -3,36 +3,61 @@
  * Korean, German, etc.) as a pixel-art font for ascii.rest's banner().
  *
  * The built-in banner fonts only cover A-Z, 0-9 and a few symbols. This module
- * uses a <canvas> + a monospace font to rasterise arbitrary characters into
+ * uses a <canvas> + a system font to rasterise arbitrary characters into
  * the pixel-grid format that banner()'s Font interface expects:
  *   - "#" for ink, anything else for empty
  *   - rows joined by "|"
  *
- * Usage:
- *   import { rasterFont, banner } from "...";
- *   const font = rasterFont("你好世界", { height: 7 });
- *   const piece = banner("你好世界", { font });
+ * CJK characters have dense strokes, so the rasteriser automatically uses a
+ * higher pixel grid (16+ rows) for them, and area-averaged downscaling to
+ * preserve stroke details that single-point sampling would lose.
  */
 
 export interface RasterOptions {
-  /** The pixel height of each glyph (rows). Default 7. */
+  /** The pixel height of each glyph (rows). 0 = auto-detect. Default 0. */
   height?: number;
   /** The pixel width of each glyph (columns). 0 = auto per character. Default 0. */
   width?: number;
-  /** The CSS font-family to use. Default a monospace fallback chain. */
+  /** The CSS font-family to use. Default a CJK + Latin fallback chain. */
   fontFamily?: string;
-  /** The font size in px for rasterising. Higher = more detail. Default 64. */
+  /** The font size in px for rasterising. Higher = more detail. Default 128. */
   fontSize?: number;
-  /** Threshold 0-255; pixels darker than this are ink. Default 128. */
+  /** Threshold 0-255; pixels with alpha above this are ink. Default 64. */
   threshold?: number;
 }
 
-/** The monospace font chain for CJK + Latin. */
+/** The font chain for CJK + Latin. */
 const FONT_CHAIN =
   '"Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK JP", "Noto Sans CJK KR", "Microsoft YaHei", "PingFang SC", "Hiragino Sans", "WenQuanYi Micro Hei", "SimHei", "SimSun", monospace';
 
+/** Unicode ranges for CJK (Chinese, Japanese, Korean) characters. */
+function isCJK(ch: string): boolean {
+  const code = ch.codePointAt(0)!;
+  return (
+    (code >= 0x4e00 && code <= 0x9fff) ||   // CJK Unified Ideographs
+    (code >= 0x3400 && code <= 0x4dbf) ||   // CJK Extension A
+    (code >= 0x3000 && code <= 0x303f) ||   // CJK Symbols and Punctuation
+    (code >= 0x3040 && code <= 0x309f) ||   // Hiragana
+    (code >= 0x30a0 && code <= 0x30ff) ||   // Katakana
+    (code >= 0xac00 && code <= 0xd7af) ||   // Hangul Syllables
+    (code >= 0x1100 && code <= 0x11ff) ||   // Hangul Jamo
+    (code >= 0xff00 && code <= 0xffef)     // Halfwidth/Fullwidth Forms
+  );
+}
+
+/**
+ * Auto-detect the optimal pixel height based on the text content.
+ * CJK characters need more rows to show their strokes clearly.
+ */
+function autoHeight(text: string): number {
+  const hasCJK = [...text].some(isCJK);
+  if (hasCJK) return 16;  // CJK: 16 rows for clear strokes
+  return 7;               // Latin: same as built-in fonts
+}
+
 /**
  * Rasterise a single character into rows of "#" / "." pixels.
+ * Uses area-averaged downscaling for better quality than point sampling.
  * Returns undefined for characters that render as blank (spaces, controls).
  */
 function rasteriseChar(
@@ -56,7 +81,7 @@ function rasteriseChar(
   for (let y = 0; y < canvas.height; y++) {
     for (let x = 0; x < canvas.width; x++) {
       const alpha = data[(y * canvas.width + x) * 4 + 3];
-      if (alpha > threshold) {
+      if (alpha > 0) {
         hasInk = true;
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -68,23 +93,48 @@ function rasteriseChar(
 
   if (!hasInk) return undefined;
 
-  // Scale the bounding box to the target height.
+  // Add small padding around the bounding box.
+  const pad = 2;
+  minX = Math.max(0, minX - pad);
+  minY = Math.max(0, minY - pad);
+  maxX = Math.min(canvas.width - 1, maxX + pad);
+  maxY = Math.min(canvas.height - 1, maxY + pad);
+
   const bbW = maxX - minX + 1;
   const bbH = maxY - minY + 1;
-  const scale = height / bbH;
-  const targetW = Math.max(1, Math.round(bbW * scale));
 
-  // Downscale using threshold sampling.
+  // Scale factor: map bounding box to target height.
+  const scale = height / bbH;
+  const targetW = width > 0 ? width : Math.max(1, Math.round(bbW * scale));
+
+  // Area-averaged downscaling: for each output pixel, average the alpha
+  // values of the source pixels that fall within it, then threshold.
   const rows: string[] = [];
   for (let py = 0; py < height; py++) {
     let row = "";
-    const sy = minY + Math.floor(py / scale);
-    for (let px = 0; px < (width || targetW); px++) {
-      const sx = minX + Math.floor(px / scale);
-      const alpha = sx >= 0 && sx < canvas.width && sy >= 0 && sy < canvas.height
-        ? data[(sy * canvas.width + sx) * 4 + 3]
-        : 0;
-      row += alpha > threshold ? "#" : ".";
+    const sy0 = minY + py / scale;
+    const sy1 = minY + (py + 1) / scale;
+    for (let px = 0; px < targetW; px++) {
+      const sx0 = minX + px / scale;
+      const sx1 = minX + (px + 1) / scale;
+      // Average alpha over the source region [sx0,sx1) x [sy0,sy1).
+      let sum = 0, count = 0;
+      const ix0 = Math.floor(sx0), ix1 = Math.ceil(sx1);
+      const iy0 = Math.floor(sy0), iy1 = Math.ceil(sy1);
+      for (let iy = iy0; iy < iy1; iy++) {
+        for (let ix = ix0; ix < ix1; ix++) {
+          if (ix < 0 || ix >= canvas.width || iy < 0 || iy >= canvas.height) continue;
+          // Overlap fraction.
+          const fx = Math.min(ix + 1, sx1) - Math.max(ix, sx0);
+          const fy = Math.min(iy + 1, sy1) - Math.max(iy, sy0);
+          if (fx > 0 && fy > 0) {
+            sum += data[(iy * canvas.width + ix) * 4 + 3] * fx * fy;
+            count += fx * fy;
+          }
+        }
+      }
+      const avg = count > 0 ? sum / count : 0;
+      row += avg > threshold ? "#" : ".";
     }
     rows.push(row);
   }
@@ -98,13 +148,13 @@ function rasteriseChar(
  * Characters not in the text are omitted (banner() will skip them).
  */
 export function rasterFont(text: string, options: RasterOptions = {}) {
-  const height = options.height ?? 7;
+  const height = options.height ?? autoHeight(text);
   const width = options.width ?? 0;
   const fontFamily = options.fontFamily ?? FONT_CHAIN;
-  const fontSize = options.fontSize ?? 64;
-  const threshold = options.threshold ?? 80;
+  const fontSize = options.fontSize ?? 128;
+  const threshold = options.threshold ?? 64;
 
-  // Set up canvas for rasterisation.
+  // Set up canvas for rasterisation — large for detail.
   const canvas = document.createElement("canvas");
   canvas.width = fontSize * 2;
   canvas.height = fontSize * 2;
@@ -128,6 +178,8 @@ export function rasterFont(text: string, options: RasterOptions = {}) {
     const sampleW = Object.values(glyphs)[0]?.split("|")[0]?.length ?? 3;
     glyphs[" "] = Array.from({ length: height }, () => ".".repeat(sampleW)).join("|");
   }
+
+  console.log(`[multi-font] rasterised ${Object.keys(glyphs).length} chars at height=${height}, font=${fontFamily.slice(0, 40)}`);
 
   return {
     height,
