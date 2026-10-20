@@ -8,6 +8,9 @@
     "added": "node scripts/added.mjs"
   },
   "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.6",
+    "@ffmpeg/util": "^0.12.1",
     "@vercel/analytics": "2.0.1",
     "@vercel/speed-insights": "2.0.0",
     "ascii.rest": "file:..",

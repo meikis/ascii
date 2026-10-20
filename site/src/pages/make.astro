@@ -29,14 +29,14 @@ const glyphs = await glyphShapes();
   <section class="block maker" style="margin-top: 2rem" data-glyphs={JSON.stringify(glyphs)}>
     <div class="well big drop empty" id="drop" role="button" tabindex="0" aria-label="Choose an image, or drop one here">
       <div class="prompt" id="prompt">
-        <p>drop an image here</p>
-        <p class="muted">svg, png, jpg, webp or gif</p>
+<p>drop an image or video here</p>
+<p class="muted">svg, png, jpg, webp, gif or mp4</p>
         <p class="muted">
           or <span class="button pick"><span>[pick a file]</span></span> or paste one
         </p>
       </div>
     </div>
-    <input type="file" id="file" accept="image/*,.svg" hidden />
+    <input type="file" id="file" accept="image/*,.svg,video/mp4,video/webm" hidden />
     <p class="facts" id="facts" hidden>
       <span id="size"></span>
       <span id="colours"></span>
@@ -380,6 +380,7 @@ const glyphs = await glyphShapes();
   import { svgOf } from "../lib/svg";
 import { gifFrames, type GifFrame } from "../lib/gif-frames";
 import { gif as makeGif, type Look } from "../lib/download";
+import { videoFrames, type VideoFrameData } from "../lib/video-frames";
 
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const glyphs = JSON.parse(document.querySelector<HTMLElement>(".maker")!.dataset.glyphs!) as Glyph[];
@@ -479,6 +480,7 @@ function showProgress(text: string, pct = -1) {
 
   // Any other image: drawn, its plain background left out unless the reader keeps it.
   async function takeImage(blob: Blob, from: string, mine = ++reading) {
+    console.log(`[make] takeImage: name=${from}, blob.type=${blob.type}, size=${blob.size}`);
     say("drawing it");
     // Check if this is an animated GIF with multiple frames.
     const isGif = blob.type === "image/gif" || (typeof (blob as File).name === "string" && /\.gif$/i.test((blob as File).name));
@@ -543,6 +545,61 @@ function showProgress(text: string, pct = -1) {
     prog.remove();
     groundButton.hidden = !src.ground && !keepGround;
     groundButton.firstElementChild!.textContent = keepGround ? "[remove the background]" : "[keep the background]";
+  }
+
+  // Video: extract frames at a target fps, then show the same frame selection modal as GIF.
+  async function takeVideo(blob: Blob, from: string, mine = ++reading) {
+    say("loading video…");
+    const prog = showProgress("loading video…");
+    try {
+      // Extract frames with progress updates.
+      const frames: GifFrame[] = [];
+      const videoData = await videoFrames(blob, 10, 200, (done, total) => {
+        prog.update(`extracting frame ${done} / ${total}…`, Math.round((done / total) * 100));
+      }, (stage) => {
+        prog.update(stage);
+      });
+      // Convert VideoFrameData to GifFrame format for reuse of the GIF UI.
+      for (const v of videoData) {
+        frames.push({ data: v.data, delay: v.delay });
+      }
+      prog.remove();
+      if (frames.length > 1 && mine === reading) {
+        console.log(`[make] video extracted ${frames.length} frames`);
+        gifAnimation = frames;
+        gifPreviewOnly = true;
+        frameSources = [];
+        for (const frame of frames) {
+          frameSources.push(sourceFromImageData(frame.data));
+        }
+        src = frameSources[0];
+        image = blob;
+        file = from;
+        nameFrom(from);
+        style = "shade";
+        for (const b of styles) b.setAttribute("aria-pressed", String(b.dataset.style === "shade"));
+        groundButton.hidden = true;
+        setGifMode(true);
+        showFrames(frames);
+        say(`Video with ${frames.length} frames. Select a range in the dialog, then click [make ascii gif].`);
+        return;
+      } else {
+        console.log(`[make] video: not enough frames (${frames.length})`);
+        say("video too short to make an animation");
+      }
+    } catch (err) {
+      prog.remove();
+      const errMsg = err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
+      console.warn("[make] video frame extraction failed:", err, "| errMsg:", errMsg);
+      if (mine === reading) say(`video error: ${errMsg}`);
+    }
+    // Do NOT fall back to takeImage — a video is not an image, and
+    // takeImage would fail again with "not an image".
+    gifAnimation = null;
+    frameSources = null;
+    gifPreviewOnly = false;
+    setGifMode(false);
+    hideFrames();
   }
 
 // GIF mode: hides motion and category, which don't apply to GIF frame animations.
@@ -796,7 +853,7 @@ update();
     const hexColors = colors.map(c => `#${c.map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("")}`);
     const palette = colors.length > 1 ? colors.flatMap(c => c) : colors[0] ?? [0, 0, 0];
     const meta = {
-      name: parts_.name, category: s.category, note: `${frames.length} frames from an animated GIF`,
+      name: parts_.name, category: s.category, note: `${frames.length} frames from an animation`,
       cols: first.cols, rows: first.rows, fps, loop,
       palette: palette.length > 3 ? palette : undefined,
     };
@@ -854,16 +911,24 @@ update();
 
   async function read(f: File | undefined) {
     if (!f) return;
-    // Its number is taken now, before the file is read, so a big SVG still being read can't win over a later image.
     const mine = ++reading;
-    // An SVG is read as markup; anything else as an image, which the browser decodes.
+    console.log(`[make] read: name=${f.name}, type=${f.type}, size=${f.size}`);
     const svg = isSvg(f) || (!f.type && /^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(await f.slice(0, 512).text()));
     if (svg) {
       if (f.size > 4_000_000) return say("that svg is over 4 MB, which is a lot for a logo");
       return take(await f.text(), f.name, mine);
     }
+    // Video: MP4, WebM, MOV — extract frames and enter the frame selection modal.
+    const isVideo = f.type.startsWith("video/") || /\.(mp4|webm|mov|avi|mkv)$/i.test(f.name);
+    console.log(`[make] isVideo=${isVideo}`);
+    if (isVideo) {
+      if (f.size > 100_000_000) return say("that video is over 100 MB: try a smaller one");
+      keepGround = false;
+      takeVideo(f, f.name, mine);
+      return;
+    }
     if (f.size > 40_000_000) return say("that image is over 40 MB: try a smaller one");
-    if (f.type && !f.type.startsWith("image/")) return say("that is not an image: try an svg, png, jpg, webp or gif");
+    if (f.type && !f.type.startsWith("image/")) return say("that is not an image or video: try an svg, png, jpg, webp, gif or mp4");
     keepGround = false;
     takeImage(f, f.name, mine);
   }

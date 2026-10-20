@@ -32,5 +32,7 @@ export default defineConfig({
   vite: {
     // The library lives one folder up, beside the site.
     server: { fs: { allow: [".."] } },
+    // ffmpeg.wasm uses dynamic imports and workers that Vite should not pre-bundle.
+    optimizeDeps: { exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"] },
   },
 });
