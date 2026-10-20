@@ -176,6 +176,7 @@ const glyphs = await glyphShapes();
         <span class="tools">
           <button class="button" type="button" data-copy="source-code" hidden><span>[copy]</span></button>
           <button class="button" type="button" id="download"><span>[download]</span></button>
+          <button class="button" type="button" id="download-gif" hidden><span>[download gif]</span></button>
         </span>
       </div>
       <pre class="code out" id="source-code"></pre>
@@ -763,6 +764,8 @@ update();
     const { slug, every, scan } = about(drawing, s);
     const ts = source(drawing, s);
     made = { piece: piece(drawing, s), slug, ts };
+    // Hide the [download gif] button for single-frame images.
+    $("download-gif").hidden = true;
     play();
     const n = drawing.colors.length;
     $("size").textContent = `${drawing.cols}×${drawing.rows}`;
@@ -836,6 +839,8 @@ update();
     else say(`${selectedFrames.length} frames from frame ${lo} to ${hi}`);
     $("embed-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
     $("readme-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
+    // Show the [download gif] button for animated pieces.
+    $("download-gif").hidden = false;
     await new Promise<void>((r) => setTimeout(r, 0));
     paint($("source-code"), made.ts, "ts");
     prog.remove();
@@ -899,9 +904,9 @@ update();
     stop = mount(el, made.piece, { motion: motion() });
   }
 
-  function save(name: string, text: string, type: string) {
+  function save(name: string, text: string | Blob, type: string) {
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([text], { type }));
+    a.href = URL.createObjectURL(text instanceof Blob ? text : new Blob([text], { type }));
     a.download = name;
     document.body.append(a);
     a.click();
@@ -1060,4 +1065,29 @@ update();
   $("download").addEventListener("click", () => made && save(`${made.slug}.ts`, made.ts, "text/plain;charset=utf-8"));
   $("svg-light").addEventListener("click", () => made && save(`${made.slug}.svg`, svgOf(made.piece, false), "image/svg+xml"));
   $("svg-dark").addEventListener("click", () => made && save(`${made.slug}.dark.svg`, svgOf(made.piece, true), "image/svg+xml"));
+  $("download-gif").addEventListener("click", async () => {
+    if (!made) return;
+    const btn = $("download-gif");
+    const orig = btn.firstElementChild!.textContent;
+    btn.firstElementChild!.textContent = "[encoding…]";
+    btn.setAttribute("disabled", "");
+    try {
+      const look: Look = {
+        mono,
+        ink: getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || "#000",
+        well: getComputedStyle(document.documentElement).getPropertyValue("--well").trim() || "#fff",
+      };
+      const seconds = made.piece.meta.loop || 2;
+      const blob = await makeGif(made.piece, look, 0, seconds, (part) => {
+        btn.firstElementChild!.textContent = `[encoding… ${Math.round(part * 100)}%]`;
+      });
+      save(`${made.slug}.gif`, blob, "image/gif");
+    } catch (err) {
+      console.warn("[make] gif download failed:", err);
+      say(`gif download failed: ${(err as Error).message}`);
+    } finally {
+      btn.firstElementChild!.textContent = orig;
+      btn.removeAttribute("disabled");
+    }
+  });
 </script>
