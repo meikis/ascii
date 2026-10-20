@@ -90,6 +90,44 @@ const glyphs = await glyphShapes();
     </p>
   </section>
 
+
+  <div class="gif-overlay" id="gif-overlay" hidden>
+    <div class="gif-modal">
+      <div class="gif-modal-head">
+        <h2>select gif frames</h2>
+        <button class="button" type="button" id="gif-cancel"><span>[cancel]</span></button>
+      </div>
+      <p class="muted note">
+        This animated GIF has <span id="frame-count">0</span> frames. Drag the sliders or click a thumbnail to choose a range.
+      </p>
+      <div class="frame-preview-wrap">
+        <canvas id="frame-preview" width="0" height="0"></canvas>
+        <span class="frame-preview-label" id="frame-preview-label">frame 0</span>
+      </div>
+      <div class="frames-bar-wrap">
+        <div class="frames-bar" id="frames-bar"></div>
+      </div>
+      <div class="frame-controls">
+        <div class="frame-slider-group">
+          <label for="frame-start">start</label>
+          <input id="frame-start" type="range" min="0" value="0" />
+          <span id="frame-start-val" class="frame-val start-val">0</span>
+        </div>
+        <div class="frame-slider-group">
+          <label for="frame-end">end</label>
+          <input id="frame-end" type="range" min="0" value="0" />
+          <span id="frame-end-val" class="frame-val end-val">0</span>
+        </div>
+      </div>
+      <div class="frame-summary">
+        <span id="frame-summary">0 frames selected</span>
+      </div>
+      <div class="gif-modal-actions">
+        <button class="button primary" type="button" id="gif-confirm"><span>[make ascii gif]</span></button>
+      </div>
+    </div>
+  </div>
+
   <section class="block">
     <div class="head">
       <h2><label for="paste">or paste an svg's markup</label></h2>
@@ -304,6 +342,34 @@ const glyphs = await glyphShapes();
   #out {
     margin-top: 2.5rem;
   }
+
+  /* --- GIF frame selection modal --- */
+  .gif-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 2rem; }
+  .gif-overlay[hidden] { display: none; }
+  .gif-modal { background: var(--well); border: 1px solid var(--ink); border-radius: 0.5rem; padding: 1.5rem; max-width: 900px; width: 100%; max-height: 90vh; overflow-y: auto; }
+  .gif-modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+  .gif-modal-head h2 { margin: 0; }
+  .gif-modal-actions { margin-top: 1rem; text-align: right; }
+  .gif-modal-actions .button.primary { font-weight: bold; }
+  .frame-summary { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; }
+  .frame-preview-wrap { display: flex; flex-direction: column; align-items: center; margin-bottom: 0.5rem; }
+  .frame-preview-wrap canvas { max-height: 120px; max-width: 100%; border: 1px solid var(--ink); border-radius: 0.25rem; }
+  .frame-preview-label { margin-top: 0.25rem; font-size: 0.8rem; color: var(--muted); }
+  .frames-bar-wrap { overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
+  .frames-bar { display: flex; gap: 2px; padding: 0.25rem 0; }
+  .frames-bar canvas { height: 48px; border: 2px solid transparent; cursor: pointer; flex-shrink: 0; border-radius: 2px; }
+  .frames-bar canvas.frame-start { border-color: #4ade80; box-shadow: 0 0 4px #4ade80; }
+  .frames-bar canvas.frame-end { border-color: #fb923c; box-shadow: 0 0 4px #fb923c; }
+  .frames-bar canvas.selected { filter: brightness(1.15); }
+  .frames-bar canvas:not(.selected) { opacity: 0.4; }
+  .frame-controls { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.75rem; }
+  .frame-slider-group { display: flex; align-items: center; gap: 0.5rem 1ch; }
+  .frame-slider-group label { color: var(--muted); min-width: 3rem; }
+  .frame-slider-group input[type="range"] { flex: 1; min-width: 8rem; }
+  .frame-val { min-width: 4ch; text-align: right; font-weight: bold; }
+  .start-val { color: #4ade80; }
+  .end-val { color: #fb923c; }
+
 </style>
 
 <script>
@@ -312,6 +378,8 @@ const glyphs = await glyphShapes();
   import { about, clean, embed, picture, piece, source, type Kind, type Settings } from "../lib/logo-file";
   import { paint } from "../lib/paint";
   import { svgOf } from "../lib/svg";
+import { gifFrames, type GifFrame } from "../lib/gif-frames";
+import { gif as makeGif, type Look } from "../lib/download";
 
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const glyphs = JSON.parse(document.querySelector<HTMLElement>(".maker")!.dataset.glyphs!) as Glyph[];
@@ -329,8 +397,11 @@ const glyphs = await glyphShapes();
   let file = "";
   let named = false; // the reader typed the name, so a new file keeps it
   let category: Kind = "companies";
-  let made: { piece: Piece; slug: string; ts: string } | null = null;
-  let stop = () => {};
+let made: { piece: Piece; slug: string; ts: string } | null = null;
+let gifAnimation: GifFrame[] | null = null;
+let frameSources: Source[] | null = null;
+let gifPreviewOnly = false;
+let stop = () => {};
   // Logos come in colour or in one ink, and the choice holds from page to page, as on the rest of the site.
   let mono = false;
   try {
@@ -352,6 +423,29 @@ const glyphs = await glyphShapes();
       timer = window.setTimeout(fn, ms);
     };
   };
+
+// Shows a centered progress overlay with a label and optional progress bar.
+function showProgress(text: string, pct = -1) {
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:2000;padding:2rem;";
+  const inner = document.createElement("div");
+  inner.style.cssText = "background:var(--well);border:1px solid var(--ink);border-radius:0.5rem;padding:1.5rem 2rem;min-width:300px;text-align:center;";
+  const label = document.createElement("p");
+  label.style.cssText = "margin:0 0 0.75rem;";
+  label.textContent = text;
+  const bar = document.createElement("div");
+  bar.style.cssText = `height:6px;background:var(--muted);border-radius:3px;overflow:hidden;display:${pct >= 0 ? "block" : "none"};`;
+  const fill = document.createElement("div");
+  fill.style.cssText = "height:100%;width:0%;background:var(--ink);transition:width 0.1s;";
+  bar.append(fill);
+  inner.append(label, bar);
+  wrap.append(inner);
+  document.body.append(wrap);
+  return {
+    update(t: string, p = -1) { label.textContent = t; if (p >= 0) { bar.style.display = "block"; fill.style.width = `${p}%`; } },
+    remove() { wrap.remove(); },
+  };
+}
   const width = () => Math.max(16, Math.min(LIMIT.cols, Math.round(+widthInput.value) || 160));
   const settings = (): Settings => ({ proper: nameInput.value, file, category, every: +everyInput.value || 5 });
 
@@ -386,30 +480,212 @@ const glyphs = await glyphShapes();
   // Any other image: drawn, its plain background left out unless the reader keeps it.
   async function takeImage(blob: Blob, from: string, mine = ++reading) {
     say("drawing it");
+    // Check if this is an animated GIF with multiple frames.
+    const isGif = blob.type === "image/gif" || (typeof (blob as File).name === "string" && /\.gif$/i.test((blob as File).name));
+    if (isGif) {
+      console.log("[make] detected GIF, parsing frames...");
+      try {
+        const frames = await gifFrames(blob);
+        console.log(`[make] gifFrames returned ${frames.length} frames`);
+        if (frames.length > 1 && mine === reading) {
+          console.log(`[make] entering GIF animation mode with ${frames.length} frames`);
+          gifAnimation = frames;
+          gifPreviewOnly = true;
+          frameSources = [];
+          for (const frame of frames) {
+            frameSources.push(sourceFromImageData(frame.data));
+          }
+          src = frameSources[0];
+          image = blob;
+          file = from;
+          nameFrom(from);
+          style = "shade";
+          for (const b of styles) b.setAttribute("aria-pressed", String(b.dataset.style === "shade"));
+          groundButton.hidden = true;
+          setGifMode(true);
+          showFrames(frames);
+          say(`GIF with ${frames.length} frames. Select a range in the dialog, then click [make ascii gif].`);
+          return;
+        } else {
+          console.log(`[make] not entering GIF mode: frames.length=${frames.length}, mine===reading=${mine === reading}`);
+        }
+      } catch (err) {
+        console.warn("[make] GIF frame parsing failed:", err);
+      }
+    }
+    // Not an animated GIF, or frame extraction failed: treat as a single image.
+    gifAnimation = null;
+    frameSources = null;
+    gifPreviewOnly = false;
+    setGifMode(false);
+    hideFrames();
+    const prog = showProgress("processing image\u2026");
     let next: Source;
     try {
       next = await raster(blob, { keepGround });
     } catch (error) {
+      prog.remove();
       if (mine === reading) say((error as Error).message);
       return;
     }
-    if (mine !== reading) return;
+    if (mine !== reading) { prog.remove(); return; }
     src = next;
     image = blob;
     file = from;
     nameFrom(from);
-    // A photo, or anything with no plain ground, reads best shaded; a new image starts in the style that suits it.
-    pickStyle(src.photo ? "shade" : "logo");
-    // A background was found: say so, and offer it back; or it was kept, and can be taken out again.
+    await new Promise<void>((r) => setTimeout(r, 0));
+    prog.update("drawing ascii\u2026");
+    const nextStyle: Style = src.photo ? "shade" : "logo";
+    style = nextStyle;
+    for (const b of styles) b.setAttribute("aria-pressed", String(b.dataset.style === nextStyle));
+    drawing = draw(src, width(), glyphs, style);
+    update();
+    prog.remove();
     groundButton.hidden = !src.ground && !keepGround;
     groundButton.firstElementChild!.textContent = keepGround ? "[remove the background]" : "[keep the background]";
   }
 
-  function redraw() {
-    if (!src) return;
-    drawing = draw(src, width(), glyphs, style);
-    update();
+// GIF mode: hides motion and category, which don't apply to GIF frame animations.
+function setGifMode(on: boolean) {
+  const motionLabel = $<HTMLElement>("motion-label");
+  const categoryLabel = $<HTMLElement>("category-label");
+  // The label and its following .choice span form a row in the grid; hide both.
+  const hide = (label: HTMLElement | null) => {
+    if (!label) return;
+    label.style.display = "none";
+    const next = label.nextElementSibling as HTMLElement | null;
+    if (next) next.style.display = "none";
+  };
+  const show = (label: HTMLElement | null) => {
+    if (!label) return;
+    label.style.display = "";
+    const next = label.nextElementSibling as HTMLElement | null;
+    if (next) next.style.display = "";
+  };
+  if (on) { hide(motionLabel); hide(categoryLabel); }
+  else { show(motionLabel); show(categoryLabel); }
+}
+
+  // Builds a Source from an ImageData (a GIF frame).
+  function sourceFromImageData(img: ImageData): Source {
+    const W = img.width, H = img.height;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    ctx.putImageData(img, 0, 0);
+    const data = img.data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++)
+        if (data[(y * W + x) * 4 + 3] > 1) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          y1 = y;
+        }
+    if (x1 < 0) return { canvas, x: 0, y: 0, w: W, h: H, photo: true };
+    return { canvas, x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1, photo: true };
   }
+
+  // Shows the GIF frame selection modal with thumbnails and range sliders.
+  function showFrames(frames: GifFrame[]) {
+    const overlay = $("gif-overlay");
+    const bar = $<HTMLDivElement>("frames-bar");
+    const startSlider = $<HTMLInputElement>("frame-start");
+    const endSlider = $<HTMLInputElement>("frame-end");
+    const countLabel = $<HTMLSpanElement>("frame-count");
+    bar.innerHTML = "";
+    const max = frames.length - 1;
+    startSlider.max = String(max);
+    endSlider.max = String(max);
+    startSlider.value = "0";
+    endSlider.value = String(max);
+    countLabel.textContent = String(frames.length);
+    const thumbCount = Math.min(frames.length, 200);
+    for (let i = 0; i < thumbCount; i++) {
+      const c = document.createElement("canvas");
+      const scale = 48 / frames[i].data.height;
+      c.width = Math.round(frames[i].data.width * scale);
+      c.height = 48;
+      const ctx = c.getContext("2d")!;
+      const tmp = document.createElement("canvas");
+      tmp.width = frames[i].data.width;
+      tmp.height = frames[i].data.height;
+      tmp.getContext("2d")!.putImageData(frames[i].data, 0, 0);
+      ctx.drawImage(tmp, 0, 0, c.width, c.height);
+      c.title = `frame ${i}`;
+      c.dataset.frame = String(i);
+      c.addEventListener("click", (ev) => {
+        if (ev.shiftKey) {
+          endSlider.value = String(i);
+        } else {
+          startSlider.value = String(i);
+          if (+endSlider.value < i) endSlider.value = String(i);
+        }
+        updateFrameSelection();
+      });
+      bar.append(c);
+    }
+    overlay.hidden = false;
+    updateFrameSelection();
+  }
+
+  function hideFrames() { $("gif-overlay").hidden = true; }
+
+  // Highlights selected thumbnails, updates the large preview, and scrolls the strip.
+  function updateFrameSelection() {
+    if (!gifAnimation) return;
+    const startVal = +$<HTMLInputElement>("frame-start").value;
+    const endVal = +$<HTMLInputElement>("frame-end").value;
+    const lo = Math.min(startVal, endVal), hi = Math.max(startVal, endVal);
+    $<HTMLSpanElement>("frame-start-val").textContent = String(lo);
+    $<HTMLSpanElement>("frame-end-val").textContent = String(hi);
+    const canvases = document.querySelectorAll<HTMLCanvasElement>("#frames-bar canvas");
+    canvases.forEach((c, i) => {
+      c.classList.toggle("selected", i >= lo && i <= hi);
+      c.classList.toggle("frame-start", i === lo);
+      c.classList.toggle("frame-end", i === hi);
+    });
+    const activeIdx = document.activeElement === $("frame-end") ? hi : lo;
+    const activeCanvas = canvases[activeIdx] as HTMLCanvasElement | undefined;
+    if (activeCanvas) {
+      const wrap = activeCanvas.parentElement!.parentElement!;
+      const cRect = activeCanvas.getBoundingClientRect();
+      const wRect = wrap.getBoundingClientRect();
+      if (cRect.left < wRect.left || cRect.right > wRect.right) {
+        wrap.scrollTo({ left: activeCanvas.offsetLeft - wrap.clientWidth / 2 + activeCanvas.offsetWidth / 2, behavior: "smooth" });
+      }
+    }
+    const previewIdx = document.activeElement === $("frame-end") ? hi : lo;
+    const previewCanvas = $<HTMLCanvasElement>("frame-preview");
+    const labelEl = $<HTMLSpanElement>("frame-preview-label");
+    if (gifAnimation[previewIdx]) {
+      const frame = gifAnimation[previewIdx].data;
+      const maxH = 120;
+      const scale = Math.min(1, maxH / frame.height);
+      previewCanvas.width = frame.width;
+      previewCanvas.height = frame.height;
+      previewCanvas.style.width = `${Math.round(frame.width * scale)}px`;
+      previewCanvas.style.height = `${Math.round(frame.height * scale)}px`;
+      previewCanvas.getContext("2d")!.putImageData(frame, 0, 0);
+      const which = document.activeElement === $("frame-end") ? "end" : "start";
+      labelEl.textContent = `frame ${previewIdx} (${which})`;
+    }
+    const count = hi - lo + 1;
+    $<HTMLSpanElement>("frame-summary").textContent = `${count} frame${count === 1 ? "" : "s"} selected (frame ${lo} to ${hi})`;
+  }
+
+function redraw() {
+if (!src) return;
+// In GIF mode, skip single-frame draw; update() will call buildGifPiece.
+if (gifAnimation && frameSources && !gifPreviewOnly) {
+update();
+return;
+}
+drawing = draw(src, width(), glyphs, style);
+update();
+}
 
   const styles = [...document.querySelectorAll<HTMLButtonElement>("[data-style]")];
   function pickStyle(next: Style) {
@@ -420,6 +696,11 @@ const glyphs = await glyphShapes();
   for (const b of styles) b.addEventListener("click", () => pickStyle(b.dataset.style as Style));
 
   function update() {
+    // GIF mode: kick off async buildGifPiece even if drawing isn't set yet.
+    if (gifAnimation && frameSources && !gifPreviewOnly) {
+      void buildGifPiece();
+      return;
+    }
     if (!drawing) return;
     const s = settings();
     const { slug, every, scan } = about(drawing, s);
@@ -445,6 +726,103 @@ const glyphs = await glyphShapes();
     // A taken name matters most, since the piece can't be added under it; then the background left out, if any.
     if ((names as string[]).includes(slug)) say(`the library already has a piece called ${slug}: give this one another name to add it`);
     else say(src?.ground ? `left out its background, ${src.ground}` : "");
+  }
+
+  // Async GIF piece builder: processes frames in batches with progress.
+  async function buildGifPiece() {
+    if (!gifAnimation || !frameSources) return;
+    const start = +$<HTMLInputElement>("frame-start").value;
+    const end = +$<HTMLInputElement>("frame-end").value;
+    const lo = Math.min(start, end), hi = Math.max(start, end);
+    const total = hi - lo + 1;
+    if (total <= 0) return;
+
+    const prog = showProgress(`processing frame 0 / ${total}\u2026`, 0);
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const w = width();
+    const selectedFrames: Drawing[] = [];
+    const BATCH = 3;
+    for (let i = lo; i <= hi; i++) {
+      if (!frameSources[i]) continue;
+      selectedFrames.push(draw(frameSources[i], w, glyphs, style));
+      const done = selectedFrames.length;
+      if (done % BATCH === 0 || done === total) {
+        prog.update(`processing frame ${done} / ${total}\u2026`, Math.round((done / total) * 100));
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    }
+    if (selectedFrames.length === 0) { prog.remove(); return; }
+
+    prog.update("finalizing\u2026");
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const s = settings();
+    drawing = selectedFrames[0];
+    made = makeAnimatedPiece(selectedFrames, gifAnimation, lo, s);
+    await new Promise<void>((r) => setTimeout(r, 0));
+    play();
+
+    const n = drawing.colors.length;
+    $("size").textContent = `${drawing.cols}\u00d7${drawing.rows}`;
+    $("colours").textContent = n === 1 ? "1 colour" : `${n} colours`;
+    $("moves").textContent = `${selectedFrames.length} frames, ${made.piece.meta.fps} fps`;
+    const bytes = new TextEncoder().encode(made.ts).length;
+    $("bytes").textContent = `${(bytes / 1024).toFixed(1)} kB`;
+    $("file-name").textContent = `${made.slug}.ts`;
+    prompt.hidden = true;
+    drop.classList.remove("empty");
+    for (const a of ["role", "tabindex", "aria-label"]) drop.removeAttribute(a);
+    $("facts").hidden = false;
+    $("out").hidden = false;
+    if ((names as string[]).includes(made.slug)) say(`the library already has a piece called ${made.slug}: give this one another name to add it`);
+    else say(`${selectedFrames.length} frames from frame ${lo} to ${hi}`);
+    $("embed-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
+    $("readme-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
+    await new Promise<void>((r) => setTimeout(r, 0));
+    paint($("source-code"), made.ts, "ts");
+    prog.remove();
+  }
+
+  // Builds an animated piece from multiple drawings (one per GIF frame), and its TypeScript source.
+  function makeAnimatedPiece(frames: Drawing[], gif: GifFrame[], startIdx: number, s: Settings): { piece: Piece; slug: string; ts: string } {
+    const first = frames[0];
+    const fps = 10;
+    const totalDelay = gif.slice(startIdx, startIdx + frames.length).reduce((sum, f) => sum + f.delay, 0);
+    const loop = totalDelay / 1000 || frames.length / fps;
+    const slug = clean(s.proper).replace(/\s+/g, "-") || "my-logo";
+    const parts_ = about(first, s);
+    const colors = first.colors;
+    const hexColors = colors.map(c => `#${c.map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("")}`);
+    const palette = colors.length > 1 ? colors.flatMap(c => c) : colors[0] ?? [0, 0, 0];
+    const meta = {
+      name: parts_.name, category: s.category, note: `${frames.length} frames from an animated GIF`,
+      cols: first.cols, rows: first.rows, fps, loop,
+      palette: palette.length > 3 ? palette : undefined,
+    };
+    const frameData = frames.map((d) => ({ art: d.art, ink: d.ink }));
+    const ex = hexColors.length > 1 ? `const palette = [${hexColors.map(h => `0x${h.slice(1)}`).join(", ")}];\n` : "";
+    const ts = `/*\n * Generated on https://ascii.rest/make/\n */\nimport type { Frame, Meta } from "../types.ts";\n\n${ex}const meta = ${JSON.stringify(meta)} as const;\n\nconst frames: { art: string[]; ink: string[] }[] = ${JSON.stringify(frameData)};\n\nconst frameFns: Frame[] = frames.map((f) => {\n  const lines = f.art.map(r => r.padEnd(first.cols));\n  const inkLines = f.ink.map(r => r.padEnd(first.cols));\n  return (t: number, env?: { paper?: boolean; color?: Uint8Array }) => {\n    const n = meta.palette ? meta.palette!.length / 6 : 1;\n    const out: string[] = [];\n    for (let y = 0; y < first.rows; y++) {\n      let line = "";\n      for (let x = 0; x < first.cols; x++) {\n        line += lines[y][x] || " ";\n      }\n      out.push(line);\n    }\n    return out.join("\\n");\n  };\n});\n\nexport default { meta, frames: frameFns } as unknown as { meta: Meta; default: Frame };\n`;
+    const runtimePiece: Piece = {
+      meta,
+      default: () => {
+        // Pre-build a Frame function for each GIF frame.
+        const frameFns: Frame[] = frames.map((f) => {
+          const lines = f.art.map(r => r.padEnd(first.cols));
+          return () => {
+            const out: string[] = [];
+            for (let y = 0; y < first.rows; y++) out.push(lines[y] || "");
+            return out.join("\n");
+          };
+        });
+        // Return a single Frame function that cycles through frames based on time.
+        return (t: number) => {
+          const idx = Math.floor((t / loop) * frames.length) % frames.length;
+          return frameFns[idx]();
+        };
+      },
+    };
+    return { piece: runtimePiece, slug, ts };
   }
 
   // Plays the piece in the well with the library's own mount, as a canvas in colour or a <pre> in one ink.
@@ -553,8 +931,36 @@ const glyphs = await glyphShapes();
     named = true;
     soon();
   });
-  widthInput.addEventListener("input", later(redraw, 250));
+  widthInput.addEventListener("change", later(redraw, 250));
   everyInput.addEventListener("input", soon);
+
+  // Frame range sliders: input only updates DOM, no draw/update.
+  const frameStart = $<HTMLInputElement>("frame-start");
+  const frameEnd = $<HTMLInputElement>("frame-end");
+  frameStart.addEventListener("input", updateFrameSelection);
+  frameEnd.addEventListener("input", updateFrameSelection);
+
+  // Confirm: close modal, generate the ASCII GIF piece from selected frames.
+  $("gif-confirm").addEventListener("click", () => {
+    if (!gifAnimation || !frameSources) return;
+    hideFrames();
+    gifPreviewOnly = false;
+    const start = +frameStart.value, end = +frameEnd.value;
+    const lo = Math.min(start, end);
+    src = frameSources[lo] ?? frameSources[0];
+    drawing = null;
+    update();
+  });
+
+  // Cancel: close modal, reset GIF state.
+  $("gif-cancel").addEventListener("click", () => {
+    hideFrames();
+    gifAnimation = null;
+    frameSources = null;
+    gifPreviewOnly = false;
+    setGifMode(false);
+    say("cancelled gif selection");
+  });
 
   const motions = [...document.querySelectorAll<HTMLButtonElement>("[data-motion]")];
   const categories = [...document.querySelectorAll<HTMLButtonElement>("[data-category]")];
