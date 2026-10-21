@@ -375,7 +375,7 @@ const glyphs = await glyphShapes();
 
 <script>
   import { mount, names, type Piece } from "ascii.rest";
-  import { draw, isSvg, LIMIT, raster, render, type Drawing, type Glyph, type Source, type Style } from "../lib/logo";
+  import { draw, isSvg, LIMIT, raster, render, palette as paletteFn, type Drawing, type Glyph, type RGB, type Source, type Style } from "../lib/logo";
   import { about, clean, embed, picture, piece, source, type Kind, type Settings } from "../lib/logo-file";
   import { paint } from "../lib/paint";
   import { svgOf } from "../lib/svg";
@@ -403,6 +403,8 @@ let made: { piece: Piece; slug: string; ts: string } | null = null;
 let gifAnimation: GifFrame[] | null = null;
 let frameSources: Source[] | null = null;
 let gifPreviewOnly = false;
+// Cached drawn frames from the last buildGifPiece, so mono/colour toggle can re-mount without re-drawing.
+let cachedFrames: { drawings: Drawing[]; lo: number; hi: number; width: number; style: Style; s: Settings } | null = null;
 let stop = () => {};
   // Logos come in colour or in one ink, and the choice holds from page to page, as on the rest of the site.
   let mono = false;
@@ -450,6 +452,14 @@ function showProgress(text: string, pct = -1) {
 }
   const width = () => Math.max(16, Math.min(LIMIT.cols, Math.round(+widthInput.value) || 160));
   const settings = (): Settings => ({ proper: nameInput.value, file, category, every: +everyInput.value || 5 });
+
+  // Wraps the synchronous, CPU-heavy draw() in a setTimeout(0) so the browser can
+  // repaint (and not show a "page not responding" dialog) before the work runs.
+  function drawAsync(src: Source, w: number, glyphs: Glyph[], style: Style): Promise<Drawing> {
+    return new Promise<Drawing>((resolve) => {
+      setTimeout(() => resolve(draw(src, w, glyphs, style)), 0);
+    });
+  }
 
   // An image's name without its extension, as the piece's name, unless the reader typed one.
   const nameFrom = (from: string) => {
@@ -520,6 +530,7 @@ function showProgress(text: string, pct = -1) {
     gifAnimation = null;
     frameSources = null;
     gifPreviewOnly = false;
+    cachedFrames = null;
     setGifMode(false);
     hideFrames();
     const prog = showProgress("processing image\u2026");
@@ -538,10 +549,12 @@ function showProgress(text: string, pct = -1) {
     nameFrom(from);
     await new Promise<void>((r) => setTimeout(r, 0));
     prog.update("drawing ascii\u2026");
+    await new Promise<void>((r) => setTimeout(r, 0));
     const nextStyle: Style = src.photo ? "shade" : "logo";
     style = nextStyle;
     for (const b of styles) b.setAttribute("aria-pressed", String(b.dataset.style === nextStyle));
-    drawing = draw(src, width(), glyphs, style);
+    // draw() is CPU-heavy; yield before and after so the browser can update the progress overlay.
+    drawing = await drawAsync(src, width(), glyphs, style);
     update();
     prog.remove();
     groundButton.hidden = !src.ground && !keepGround;
@@ -599,6 +612,7 @@ function showProgress(text: string, pct = -1) {
     gifAnimation = null;
     frameSources = null;
     gifPreviewOnly = false;
+    cachedFrames = null;
     setGifMode(false);
     hideFrames();
   }
@@ -634,14 +648,16 @@ function setGifMode(on: boolean) {
     ctx.putImageData(img, 0, 0);
     const data = img.data;
     let x0 = W, y0 = H, x1 = -1, y1 = -1;
-    for (let y = 0; y < H; y++)
+    for (let y = 0; y < H; y++) {
+      const rowBase = y * W;
       for (let x = 0; x < W; x++)
-        if (data[(y * W + x) * 4 + 3] > 1) {
+        if (data[(rowBase + x) * 4 + 3] > 1) {
           if (x < x0) x0 = x;
           if (x > x1) x1 = x;
           if (y < y0) y0 = y;
           y1 = y;
         }
+    }
     if (x1 < 0) return { canvas, x: 0, y: 0, w: W, h: H, photo: true };
     return { canvas, x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1, photo: true };
   }
@@ -741,8 +757,11 @@ if (gifAnimation && frameSources && !gifPreviewOnly) {
 update();
 return;
 }
-drawing = draw(src, width(), glyphs, style);
+// draw() is CPU-heavy; run it asynchronously to avoid blocking the UI.
+void (async () => {
+drawing = await drawAsync(src, width(), glyphs, style);
 update();
+})();
 }
 
   const styles = [...document.querySelectorAll<HTMLButtonElement>("[data-style]")];
@@ -754,8 +773,26 @@ update();
   for (const b of styles) b.addEventListener("click", () => pickStyle(b.dataset.style as Style));
 
   function update() {
-    // GIF mode: kick off async buildGifPiece even if drawing isn't set yet.
+    // GIF mode: check if we can just re-mount (mono toggle) or need to re-build frames.
     if (gifAnimation && frameSources && !gifPreviewOnly) {
+      const start = +$<HTMLInputElement>("frame-start").value;
+      const end = +$<HTMLInputElement>("frame-end").value;
+      const lo = Math.min(start, end), hi = Math.max(start, end);
+      // If we have cached frames for this exact range, width and style, just re-mount with current mono.
+      if (cachedFrames && cachedFrames.lo === lo && cachedFrames.hi === hi && cachedFrames.width === width() && cachedFrames.style === style) {
+        // Re-create the piece from cached drawings (so embed/readme code reflects current mono), then play.
+        const s = settings();
+        drawing = cachedFrames.drawings[0];
+        made = makeAnimatedPiece(cachedFrames.drawings, gifAnimation, lo, s);
+        play();
+        const n = drawing.colors.length;
+        $("colours").textContent = n === 1 ? "1 colour" : `${n} colours`;
+        $("embed-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
+        $("readme-code").textContent = "(multi-frame GIF piece \u2014 use the .ts file)";
+        $("download-gif").hidden = false;
+        return;
+      }
+      // Frame range or width changed: re-build from scratch.
       void buildGifPiece();
       return;
     }
@@ -801,11 +838,13 @@ update();
     await new Promise<void>((r) => setTimeout(r, 0));
 
     const w = width();
+    const s = settings();
     const selectedFrames: Drawing[] = [];
-    const BATCH = 3;
+    const BATCH = 8;
     for (let i = lo; i <= hi; i++) {
       if (!frameSources[i]) continue;
-      selectedFrames.push(draw(frameSources[i], w, glyphs, style));
+      // Use drawAsync so the browser can repaint between frames.
+      selectedFrames.push(await drawAsync(frameSources[i], w, glyphs, style));
       const done = selectedFrames.length;
       if (done % BATCH === 0 || done === total) {
         prog.update(`processing frame ${done} / ${total}\u2026`, Math.round((done / total) * 100));
@@ -817,9 +856,12 @@ update();
     prog.update("finalizing\u2026");
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    const s = settings();
     drawing = selectedFrames[0];
     made = makeAnimatedPiece(selectedFrames, gifAnimation, lo, s);
+    // Cache the drawn frames so a mono/colour toggle re-mounts instantly without re-drawing.
+    cachedFrames = { drawings: selectedFrames, lo, hi, width: w, style, s };
+    // The frames are now built: clear the preview-only flag so update() uses the cache on mono/colour toggle.
+    gifPreviewOnly = false;
     await new Promise<void>((r) => setTimeout(r, 0));
     play();
 
@@ -854,33 +896,85 @@ update();
     const loop = totalDelay / 1000 || frames.length / fps;
     const slug = clean(s.proper).replace(/\s+/g, "-") || "my-logo";
     const parts_ = about(first, s);
-    const colors = first.colors;
+
+    // Collect a unified palette across all frames: each frame's draw() quantizes colours independently,
+    // so ink indices are local to each frame. We merge all frames' colours into one palette and remap.
+    const unifiedColors: RGB[] = [];
+    const colorKey = (c: RGB) => `${c[0]},${c[1]},${c[2]}`;
+    const unifiedMap = new Map<string, number>();
+    for (const f of frames) {
+      for (const c of f.colors) {
+        const key = colorKey(c);
+        if (!unifiedMap.has(key)) {
+          unifiedMap.set(key, unifiedColors.length);
+          unifiedColors.push(c);
+        }
+      }
+    }
+    const colors = unifiedColors;
+    const nColors = colors.length;
+
+    // Remap each frame's ink indices from local colours to unified palette indices.
+    const remappedInk: string[][] = frames.map((f) => {
+      const localToUnified = f.colors.map(c => unifiedMap.get(colorKey(c))!);
+      return f.ink.map(row =>
+        row.replace(/[^ ]/g, ch => {
+          const localIdx = ch.charCodeAt(0);
+          const idx = localIdx >= 48 && localIdx <= 57 ? localIdx - 48
+            : localIdx >= 97 && localIdx <= 122 ? localIdx - 87
+            : 0;
+          return (localToUnified[idx] ?? 0).toString(36);
+        })
+      );
+    });
+
     const hexColors = colors.map(c => `#${c.map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("")}`);
-    const palette = colors.length > 1 ? colors.flatMap(c => c) : colors[0] ?? [0, 0, 0];
+    // palette must be hex strings for mount's canvas rendering; use the library's palette() for proper light/dark variants.
+    const fullPalette = paletteFn(colors);
     const meta = {
       name: parts_.name, category: s.category, note: `${frames.length} frames from an animation`,
       cols: first.cols, rows: first.rows, fps, loop,
-      palette: palette.length > 3 ? palette : undefined,
+      palette: nColors > 1 ? fullPalette : undefined,
     };
-    const frameData = frames.map((d) => ({ art: d.art, ink: d.ink }));
+    const frameData = frames.map((d, i) => ({ art: d.art, ink: remappedInk[i] }));
     const ex = hexColors.length > 1 ? `const palette = [${hexColors.map(h => `0x${h.slice(1)}`).join(", ")}];\n` : "";
     const ts = `/*\n * Generated on https://ascii.rest/make/\n */\nimport type { Frame, Meta } from "../types.ts";\n\n${ex}const meta = ${JSON.stringify(meta)} as const;\n\nconst frames: { art: string[]; ink: string[] }[] = ${JSON.stringify(frameData)};\n\nconst frameFns: Frame[] = frames.map((f) => {\n  const lines = f.art.map(r => r.padEnd(first.cols));\n  const inkLines = f.ink.map(r => r.padEnd(first.cols));\n  return (t: number, env?: { paper?: boolean; color?: Uint8Array }) => {\n    const n = meta.palette ? meta.palette!.length / 6 : 1;\n    const out: string[] = [];\n    for (let y = 0; y < first.rows; y++) {\n      let line = "";\n      for (let x = 0; x < first.cols; x++) {\n        line += lines[y][x] || " ";\n      }\n      out.push(line);\n    }\n    return out.join("\\n");\n  };\n});\n\nexport default { meta, frames: frameFns } as unknown as { meta: Meta; default: Frame };\n`;
     const runtimePiece: Piece = {
       meta,
       default: () => {
-        // Pre-build a Frame function for each GIF frame.
-        const frameFns: Frame[] = frames.map((f) => {
+        // Pre-build a Frame function for each GIF frame that fills the color array from ink data.
+        const frameFns: Frame[] = frames.map((f, fi) => {
           const lines = f.art.map(r => r.padEnd(first.cols));
-          return () => {
+          const inkLines = remappedInk[fi].map(r => r.padEnd(first.cols));
+          return (t: number, env?: { paper?: boolean; color?: Uint8Array }) => {
             const out: string[] = [];
             for (let y = 0; y < first.rows; y++) out.push(lines[y] || "");
-            return out.join("\n");
+            const text = out.join("\n");
+            // Fill the color buffer for canvas rendering: each non-space cell gets its ink colour index.
+            if (env?.color && nColors > 1) {
+              let i = 0;
+              for (let y = 0; y < first.rows; y++) {
+                const inkRow = inkLines[y] || "";
+                for (let x = 0; x < first.cols; x++) {
+                  const ch = text.charCodeAt(y * (first.cols + 1) + x);
+                  if (ch !== 32 && ch !== 10) {
+                    const inkChar = inkRow.charCodeAt(x);
+                    const inkIdx = inkChar >= 48 && inkChar <= 57 ? inkChar - 48
+                      : inkChar >= 97 && inkChar <= 122 ? inkChar - 87
+                      : 0;
+                    env.color[i] = (env.paper ? 0 : 3 * nColors) + inkIdx;
+                  }
+                  i++;
+                }
+              }
+            }
+            return text;
           };
         });
         // Return a single Frame function that cycles through frames based on time.
-        return (t: number) => {
+        return (t: number, env?: { paper?: boolean; color?: Uint8Array }) => {
           const idx = Math.floor((t / loop) * frames.length) % frames.length;
-          return frameFns[idx]();
+          return frameFns[idx](t, env);
         };
       },
     };
@@ -917,7 +1011,6 @@ update();
   async function read(f: File | undefined) {
     if (!f) return;
     const mine = ++reading;
-    console.log(`[make] read: name=${f.name}, type=${f.type}, size=${f.size}`);
     const svg = isSvg(f) || (!f.type && /^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(await f.slice(0, 512).text()));
     if (svg) {
       if (f.size > 4_000_000) return say("that svg is over 4 MB, which is a lot for a logo");
@@ -925,7 +1018,6 @@ update();
     }
     // Video: MP4, WebM, MOV — extract frames and enter the frame selection modal.
     const isVideo = f.type.startsWith("video/") || /\.(mp4|webm|mov|avi|mkv)$/i.test(f.name);
-    console.log(`[make] isVideo=${isVideo}`);
     if (isVideo) {
       if (f.size > 100_000_000) return say("that video is over 100 MB: try a smaller one");
       keepGround = false;
@@ -1028,6 +1120,7 @@ update();
     gifAnimation = null;
     frameSources = null;
     gifPreviewOnly = false;
+    cachedFrames = null;
     setGifMode(false);
     say("cancelled gif selection");
   });

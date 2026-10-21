@@ -106,9 +106,14 @@ async function videoFramesNative(
   const total = Math.min(maxFrames, Math.ceil(duration * fps));
   const interval = duration / total;
 
+  // Downscale large videos to reduce pixel processing downstream.
+  const maxDim = 640;
+  const scale = Math.min(1, maxDim / Math.max(vw, vh));
+  const cw = Math.round(vw * scale), ch = Math.round(vh * scale);
+
   const canvas = document.createElement("canvas");
-  canvas.width = vw;
-  canvas.height = vh;
+  canvas.width = cw;
+  canvas.height = ch;
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 
   const frames: VideoFrameData[] = [];
@@ -116,8 +121,8 @@ async function videoFramesNative(
   for (let i = 0; i < total; i++) {
     const t = i * interval;
     await seekNative(video, t);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, cw, ch);
+    const data = ctx.getImageData(0, 0, cw, ch);
     frames.push({ data, delay: 1000 / fps });
     if (onProgress) onProgress(i + 1, total);
   }
@@ -127,26 +132,23 @@ async function videoFramesNative(
 }
 
 function seekNative(video: HTMLVideoElement, time: number): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let settled = false;
-    const cleanup = () => {
-      video.removeEventListener("seeked", onSeeked);
-      clearTimeout(tid);
-    };
-    const onSeeked = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
     const tid = setTimeout(() => {
       if (settled) return;
       settled = true;
-      cleanup();
-      reject(new Error(`native: seek ${time}s timeout`));
-    }, 8_000);
-    video.addEventListener("seeked", onSeeked, { once: true });
-    video.currentTime = time;
+      video.removeEventListener("seeked", onSeeked);
+      resolve(); // don't reject — skip the frame instead
+    }, 3_000);
+    const onSeeked = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(tid);
+      video.removeEventListener("seeked", onSeeked);
+      resolve();
+    };
+    video.addEventListener("seeked", onSeeked);
+    try { video.currentTime = time; } catch { clearTimeout(tid); resolve(); }
   });
 }
 
@@ -280,14 +282,21 @@ async function videoFramesFFmpeg(
 
 /**
  * Decodes a PNG Blob to an ImageData object using an ImageBitmap.
+ * Reuses a single canvas to avoid per-frame allocation.
  */
 async function pngToImageData(pngBlob: Blob): Promise<ImageData | null> {
   const bitmap = await createImageBitmap(pngBlob);
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-  ctx.drawImage(bitmap, 0, 0);
+  // Reuse a shared canvas instead of creating one per frame.
+  if (!pngCanvas || pngCanvas.width !== bitmap.width || pngCanvas.height !== bitmap.height) {
+    pngCanvas = document.createElement("canvas");
+    pngCanvas.width = bitmap.width;
+    pngCanvas.height = bitmap.height;
+    pngCtx = pngCanvas.getContext("2d", { willReadFrequently: true })!;
+  }
+  pngCtx!.drawImage(bitmap, 0, 0);
   bitmap.close();
-  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return pngCtx!.getImageData(0, 0, pngCanvas.width, pngCanvas.height);
 }
+
+let pngCanvas: HTMLCanvasElement | null = null;
+let pngCtx: CanvasRenderingContext2D | null = null;

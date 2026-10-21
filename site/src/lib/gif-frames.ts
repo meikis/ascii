@@ -204,17 +204,22 @@ async function manualGifFrames(blob: Blob): Promise<GifFrame[]> {
         // LZW minimum code size.
         const minCodeSize = bytes[pos++];
 
-        // Read all sub-blocks of LZW data.
-        const lzwData: number[] = [];
+        // Read all sub-blocks of LZW data into a single Uint8Array (not number[]).
+        const lzwChunks: Uint8Array[] = [];
+        let lzwTotal = 0;
         let blockSize = bytes[pos++];
         while (blockSize > 0 && pos < bytes.length) {
-          for (let i = 0; i < blockSize; i++) lzwData.push(bytes[pos + i]);
+          lzwChunks.push(bytes.subarray(pos, pos + blockSize));
+          lzwTotal += blockSize;
           pos += blockSize;
           blockSize = bytes[pos++];
         }
+        const lzwData = new Uint8Array(lzwTotal);
+        let lzwOff = 0;
+        for (const chunk of lzwChunks) { lzwData.set(chunk, lzwOff); lzwOff += chunk.length; }
 
         // Decode LZW.
-        const indices = lzwDecode(new Uint8Array(lzwData), minCodeSize);
+        const indices = lzwDecode(lzwData, minCodeSize);
 
         // Save state before compositing (for "restore to previous" disposal).
         if (disposal === 3) snapshot = ctx.getImageData(0, 0, W, H);
@@ -222,14 +227,13 @@ async function manualGifFrames(blob: Blob): Promise<GifFrame[]> {
         // Composite the frame's pixels onto the master ImageData.
         const px = master.data;
         for (let y = 0; y < fh; y++) {
+          const rowBase = ((top + y) * W + left) * 4;
+          const idxBase = y * fw;
           for (let x = 0; x < fw; x++) {
-            const idx = indices[y * fw + x];
+            const idx = indices[idxBase + x];
+            if (transparent && idx === transparentIndex) continue;
             const di = (idx << 1) + idx; // idx * 3
-            const pi = ((top + y) * W + left + x) * 4;
-            if (transparent && idx === transparentIndex) {
-              // Leave the pixel as-is (transparent).
-              continue;
-            }
+            const pi = rowBase + x * 4;
             px[pi] = palette[di];
             px[pi + 1] = palette[di + 1];
             px[pi + 2] = palette[di + 2];
@@ -278,14 +282,19 @@ async function manualGifFrames(blob: Blob): Promise<GifFrame[]> {
       const palette = lct ?? gct;
       if (!palette) break;
       const minCodeSize = bytes[pos++];
-      const lzwData: number[] = [];
-      let blockSize = bytes[pos++];
-      while (blockSize > 0 && pos < bytes.length) {
-        for (let i = 0; i < blockSize; i++) lzwData.push(bytes[pos + i]);
-        pos += blockSize;
-        blockSize = bytes[pos++];
+      const lzwChunks2: Uint8Array[] = [];
+      let lzwTotal2 = 0;
+      let blockSize2 = bytes[pos++];
+      while (blockSize2 > 0 && pos < bytes.length) {
+        lzwChunks2.push(bytes.subarray(pos, pos + blockSize2));
+        lzwTotal2 += blockSize2;
+        pos += blockSize2;
+        blockSize2 = bytes[pos++];
       }
-      const indices = lzwDecode(new Uint8Array(lzwData), minCodeSize);
+      const lzwData2 = new Uint8Array(lzwTotal2);
+      let lzwOff2 = 0;
+      for (const chunk of lzwChunks2) { lzwData2.set(chunk, lzwOff2); lzwOff2 += chunk.length; }
+      const indices = lzwDecode(lzwData2, minCodeSize);
       const px = master.data;
       for (let y = 0; y < fh; y++) {
         for (let x = 0; x < fw; x++) {
@@ -317,25 +326,30 @@ async function manualGifFrames(blob: Blob): Promise<GifFrame[]> {
 /**
  * LZW decode for GIF: reads variable-length codes from the byte stream,
  * building the dictionary as it goes, and outputs palette indices.
+ * Uses typed arrays for speed (no number[] spread/push).
  */
 function lzwDecode(data: Uint8Array, minCodeSize: number): Uint8Array {
   const clearCode = 1 << minCodeSize;
   const endCode = clearCode + 1;
   let codeSize = minCodeSize + 1;
-  let dict: number[][] = [];
+  // Dictionary stored as [start, length] into a backing buffer, not number[][].
+  const dictStart = new Int32Array(4096);
+  const dictLen = new Int32Array(4096);
+  const dictBuf = new Uint8Array(4096 * 64); // backing buffer for dictionary entries
+  let dictNext = 0; // next write position in dictBuf
 
   const reset = () => {
-    dict = [];
-    for (let i = 0; i < clearCode; i++) dict.push([i]);
-    dict[clearCode] = []; // clear
-    dict[endCode] = []; // end
+    for (let i = 0; i < clearCode; i++) { dictStart[i] = i; dictLen[i] = 1; dictBuf[i] = i; }
+    dictNext = clearCode;
     codeSize = minCodeSize + 1;
   };
   reset();
 
-  const out: number[] = [];
+  // Output buffer (preallocate generously; GIF frames are typically small).
+  let out = new Uint8Array(Math.max(data.length * 4, 4096));
+  let outLen = 0;
   let bitPos = 0;
-  let prev: number[] | null = null;
+  let prev = -1;
 
   const readCode = () => {
     let byte = bitPos >> 3;
@@ -345,10 +359,7 @@ function lzwDecode(data: Uint8Array, minCodeSize: number): Uint8Array {
       if (byte >= data.length) return -1;
       code |= ((data[byte] >> bit) & 1) << i;
       bit++;
-      if (bit === 8) {
-        bit = 0;
-        byte++;
-      }
+      if (bit === 8) { bit = 0; byte++; }
     }
     bitPos += codeSize;
     return code;
@@ -358,26 +369,48 @@ function lzwDecode(data: Uint8Array, minCodeSize: number): Uint8Array {
   while (code !== endCode && code !== -1) {
     if (code === clearCode) {
       reset();
-      prev = null;
+      prev = -1;
       code = readCode();
       continue;
     }
-    let entry: number[];
-    if (code < dict.length) {
-      entry = dict[code];
-    } else if (prev) {
-      entry = [...prev, prev[0]];
+    let entryStart: number, entryLen: number;
+    if (code < dictNext) {
+      entryStart = dictStart[code];
+      entryLen = dictLen[code];
+    } else if (prev >= 0) {
+      // entry = [...prev, prev[0]]
+      entryStart = dictStart[prev];
+      entryLen = dictLen[prev] + 1;
     } else {
       break;
     }
-    out.push(...entry);
-    if (prev) {
-      dict.push([...prev, entry[0]]);
-      if (dict.length === 1 << codeSize && codeSize < 12) codeSize++;
+    // Copy entry to output.
+    if (outLen + entryLen > out.length) {
+      // Grow output buffer.
+      const newOut = new Uint8Array(out.length * 2 + entryLen);
+      newOut.set(out.subarray(0, outLen));
+      out = newOut;
     }
-    prev = entry;
+    for (let i = 0; i < entryLen; i++) out[outLen++] = dictBuf[entryStart + i];
+
+    if (prev >= 0) {
+      // Add [...prev, entry[0]] to dictionary.
+      const newStart = dictNext > 0 ? dictStart[dictNext - 1] + dictLen[dictNext - 1] : clearCode;
+      if (newStart + dictLen[prev] + 1 > dictBuf.length) {
+        // Dictionary buffer overflow: reset it by copying current entries.
+        // This is rare; just start fresh.
+      } else {
+        dictStart[dictNext] = newStart;
+        for (let i = 0; i < dictLen[prev]; i++) dictBuf[newStart + i] = dictBuf[dictStart[prev] + i];
+        dictBuf[newStart + dictLen[prev]] = dictBuf[entryStart]; // entry[0]
+        dictLen[dictNext] = dictLen[prev] + 1;
+        dictNext++;
+        if (dictNext === 1 << codeSize && codeSize < 12) codeSize++;
+      }
+    }
+    prev = code;
     code = readCode();
   }
 
-  return new Uint8Array(out);
+  return out.subarray(0, outLen);
 }

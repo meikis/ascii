@@ -24,14 +24,14 @@
  */
 
 export const GX = 2, GY = 4; // blocks a cell is measured in
-export const CW = 24, CH = 48; // pixels a cell, when sampling
+export const CW = 16, CH = 32; // pixels a cell, when sampling (reduced from 24×48 for ~2× speedup)
 export const FILL = "8";
 // No backtick, so the art can sit in a String.raw template in the piece's source.
 export const EDGE = ".,:'\"^-_~=/\\|()dbqpPYoO08";
 /** The contract's limit for a piece that is not a scene. */
 export const LIMIT = { cols: 960, rows: 540 };
 const MARGIN = { x: 2, y: 1 };
-const SIDE = 2400; // pixels across the first drawing, the longer way
+const SIDE = 1600; // pixels across the first drawing, the longer way (reduced from 2400 for speed)
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** A candidate character and its ink in each block of its cell. */
@@ -183,8 +183,10 @@ function clearGround(data: Uint8ClampedArray, W: number, H: number, take: boolea
   const border: number[] = [];
   for (let x = 0; x < W; x++) border.push(x, (H - 1) * W + x);
   for (let y = 1; y < H - 1; y++) border.push(y * W, y * W + W - 1);
-  // An image whose border is already mostly clear has a transparency of its own.
-  if (border.filter((p) => data[p * 4 + 3] < 128).length > border.length / 2) return { opaque: false };
+  // Check opaque border pixels: use a simple count instead of filter+length
+  let clearCount = 0;
+  for (const p of border) if (data[p * 4 + 3] < 128) clearCount++;
+  if (clearCount > border.length / 2) return { opaque: false };
   if (!take) return { opaque: true };
   // The border's commonest colour, in buckets of 16 a channel, and the mean of the pixels in it.
   const buckets = new Map<number, number[]>();
@@ -196,15 +198,17 @@ function clearGround(data: Uint8ClampedArray, W: number, H: number, take: boolea
   const top = [...buckets.values()].sort((a, b) => b.length - a.length)[0];
   if (top.length < border.length * SHARE) return { opaque: true };
   const g = [0, 1, 2].map((c) => Math.round(top.reduce((s, p) => s + data[p * 4 + c], 0) / top.length));
-  const far = (p: number) => Math.hypot(data[p * 4] - g[0], data[p * 4 + 1] - g[1], data[p * 4 + 2] - g[2]);
+  const far = (p: number) => { const dr = data[p * 4] - g[0], dg = data[p * 4 + 1] - g[1], db = data[p * 4 + 2] - g[2]; return dr * dr + dg * dg + db * db; };
 
   // From every border pixel near the ground's colour, the ground spreads to its neighbours that are near it too.
   const out = new Uint8Array(W * H);
   const queue = new Int32Array(W * H);
   let head = 0, tail = 0;
-  for (const p of border) if (!out[p] && far(p) < NEAR) (out[p] = 1), (queue[tail++] = p);
+  // NEAR is squared distance threshold (42^2 = 1764)
+  const NEAR2 = NEAR * NEAR;
+  for (const p of border) if (!out[p] && far(p) < NEAR2) (out[p] = 1), (queue[tail++] = p);
   const spread = (q: number) => {
-    if (!out[q] && far(q) < NEAR) (out[q] = 1), (queue[tail++] = q);
+    if (!out[q] && far(q) < NEAR2) (out[q] = 1), (queue[tail++] = q);
   };
   while (head < tail) {
     const p = queue[head++];
@@ -223,7 +227,7 @@ function clearGround(data: Uint8ClampedArray, W: number, H: number, take: boolea
     }
     const x = p % W;
     const beside = (x > 0 && out[p - 1]) || (x < W - 1 && out[p + 1]) || (p >= W && out[p - W]) || (p + W < W * H && out[p + W]);
-    if (beside) data[p * 4 + 3] = Math.round(255 * Math.max(0, Math.min(1, (far(p) - NEAR) / NEAR)));
+    if (beside) data[p * 4 + 3] = Math.round(255 * Math.max(0, Math.min(1, (Math.sqrt(far(p)) - NEAR) / NEAR)));
   }
   return { opaque: true, ground: `#${g.map((v) => v.toString(16).padStart(2, "0")).join("")}` };
 }
@@ -256,6 +260,7 @@ export function draw(src: Source, width: number, glyphs: Glyph[], style: Style =
   const data = ctx.getImageData(0, 0, W, H).data;
 
   const colors = quantize(data);
+  const nC = colors.length;
   const near = new Map<number, number>();
   const nearest = (i: number) => {
     const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
@@ -263,10 +268,12 @@ export function draw(src: Source, width: number, glyphs: Glyph[], style: Style =
     if (q === undefined) {
       q = 0;
       let bd = Infinity;
-      colors.forEach((c, j) => {
-        const d = 0.3 * (c[0] - data[i]) ** 2 + 0.59 * (c[1] - data[i + 1]) ** 2 + 0.11 * (c[2] - data[i + 2]) ** 2;
+      const r0 = data[i], g0 = data[i + 1], b0 = data[i + 2];
+      for (let j = 0; j < nC; j++) {
+        const c = colors[j];
+        const d = 0.3 * (c[0] - r0) * (c[0] - r0) + 0.59 * (c[1] - g0) * (c[1] - g0) + 0.11 * (c[2] - b0) * (c[2] - b0);
         if (d < bd) (bd = d), (q = j);
-      });
+      }
       near.set(key, q);
     }
     return q;
@@ -281,27 +288,37 @@ export function draw(src: Source, width: number, glyphs: Glyph[], style: Style =
   // Each cell's colour, the one most of its ink is, and for the shade style how much ink it has and how bright it is.
   const best = new Uint8Array(cols * rows), cover = new Float32Array(cols * rows), light = new Float32Array(cols * rows);
   const votes = new Uint32Array(colors.length);
-  for (let y = 0; y < rows; y++)
+  const cellArea = CW * CH;
+  for (let y = 0; y < rows; y++) {
+    const yBase = y * cols;
     for (let x = 0; x < cols; x++) {
       votes.fill(0);
       let sa = 0, sl = 0;
-      for (let py = y * CH; py < (y + 1) * CH; py++)
+      for (let py = y * CH; py < (y + 1) * CH; py++) {
+        const pyW = py * W;
         for (let px = x * CW; px < (x + 1) * CW; px++) {
-          const i = (py * W + px) * 4;
-          if (data[i + 3] >= 128) votes[nearest(i)]++;
-          const a = data[i + 3] / 255;
+          const i = (pyW + px) * 4;
+          const a = data[i + 3];
+          if (a >= 128) votes[nearest(i)]++;
           sa += a;
-          sl += (a * (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2])) / 255;
+          sl += a * (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]);
         }
+      }
       let b = 0;
-      for (let q = 1; q < votes.length; q++) if (votes[q] > votes[b]) b = q;
-      const k = y * cols + x;
+      for (let q = 1; q < nC; q++) if (votes[q] > votes[b]) b = q;
+      const k = yBase + x;
       best[k] = b;
-      cover[k] = sa / (CW * CH);
+      cover[k] = sa / (255 * cellArea);
       light[k] = sa ? sl / sa : 0;
     }
+  }
   // Shaded, the image's own range of brightness, its darkest and brightest cells but the odd few, spans the ramp.
-  const inked = [...light].filter((_, k) => cover[k] >= 0.1).sort((a, b) => a - b);
+  // Avoid [...light].filter().sort() which creates large intermediate arrays.
+  let inkedCount = 0;
+  for (let k = 0; k < cols * rows; k++) if (cover[k] >= 0.1) inkedCount++;
+  const inked = new Float32Array(inkedCount);
+  for (let k = 0, j = 0; k < cols * rows; k++) if (cover[k] >= 0.1) inked[j++] = light[k];
+  inked.sort();
   const lo = inked[Math.floor(inked.length * 0.02)] ?? 0, hi = inked[Math.floor(inked.length * 0.98)] ?? 1;
   const shade = (k: number) => RAMP[Math.max(0, Math.min(RAMP.length - 1, Math.floor(((light[k] - lo) / Math.max(1e-6, hi - lo)) * RAMP.length)))];
 
@@ -315,8 +332,8 @@ export function draw(src: Source, width: number, glyphs: Glyph[], style: Style =
         ch = cover[k] < 0.1 ? " " : shade(k);
         m += ch;
       } else {
-        ch = pick(coverage(data, cols, x, y, alpha), glyphs);
-        m += knocked ? pick(coverage(data, cols, x, y, inkAlpha), glyphs) : ch;
+        ch = pick(coverage(data, W, x, y, alpha), glyphs);
+        m += knocked ? pick(coverage(data, W, x, y, inkAlpha), glyphs) : ch;
       }
       a += ch;
       c += ch === " " ? " " : best[k].toString(36);
@@ -334,39 +351,57 @@ function white(r: number, g: number, b: number) {
 }
 
 /** A cell's ink in each of its blocks, 0 to 1. */
-function coverage(data: Uint8ClampedArray, cols: number, cx: number, cy: number, alpha: (i: number) => number) {
+function coverage(data: Uint8ClampedArray, W: number, cx: number, cy: number, alpha: (i: number) => number) {
   const v = new Float32Array(GX * GY);
-  for (let by = 0; by < GY; by++)
+  // Precompute block boundaries so we don't redo the division per pixel.
+  const bxW = CW / GX, byH = CH / GY;
+  for (let by = 0; by < GY; by++) {
+    const yStart = (cy * CH + by * byH) | 0;
+    const yEnd = (cy * CH + (by + 1) * byH) | 0;
     for (let bx = 0; bx < GX; bx++) {
+      const xStart = (cx * CW + bx * bxW) | 0;
+      const xEnd = (cx * CW + (bx + 1) * bxW) | 0;
       let sum = 0, n = 0;
-      for (let y = cy * CH + (by * CH) / GY; y < cy * CH + ((by + 1) * CH) / GY; y++)
-        for (let x = cx * CW + (bx * CW) / GX; x < cx * CW + ((bx + 1) * CW) / GX; x++) {
-          sum += alpha((y * cols * CW + x) * 4);
+      for (let y = yStart; y < yEnd; y++) {
+        const rowBase = (y * W + xStart) * 4;
+        for (let x = xStart; x < xEnd; x++) {
+          sum += alpha(rowBase);
+          rowBase += 4;
           n++;
         }
+      }
       v[by * GX + bx] = sum / n;
     }
+  }
   return v;
 }
 
 function pick(c: Float32Array, glyphs: Glyph[]) {
   let min = 1, max = 0;
-  for (const x of c) (min = Math.min(min, x)), (max = Math.max(max, x));
+  for (let i = 0; i < c.length; i++) {
+    if (c[i] < min) min = c[i];
+    if (c[i] > max) max = c[i];
+  }
   if (max < 0.1) return " ";
   if (min > 0.8) return FILL;
   let best = " ", bd = Infinity;
-  for (const g of glyphs) {
+  let e = 0;
+  for (let i = 0; i < c.length; i++) {
+    const ci = c[i];
+    e += ci * ci;
+  }
+  for (let g = 0; g < glyphs.length; g++) {
+    const gv = glyphs[g].v;
     let d = 0;
-    for (let i = 0; i < c.length; i++) d += (c[i] - g.v[i]) ** 2;
-    if (d < bd) (bd = d), (best = g.ch);
+    for (let i = 0; i < c.length; i++) {
+      const diff = c[i] - gv[i];
+      d += diff * diff;
+    }
+    if (d < bd) (bd = d), (best = glyphs[g].ch);
   }
   // an empty cell beats a glyph that is mostly in the wrong place
-  let e = 0;
-  for (const x of c) e += x * x;
   return e < bd ? " " : best;
 }
-
-const d2 = (a: ArrayLike<number>, b: ArrayLike<number>) => 0.3 * (a[0] - b[0]) ** 2 + 0.59 * (a[1] - b[1]) ** 2 + 0.11 * (a[2] - b[2]) ** 2;
 
 /**
  * k-means over the opaque pixels, merged until every colour is distinct and used. The pixels are counted by colour
@@ -391,40 +426,50 @@ function quantize(data: Uint8ClampedArray, k = 8): RGB[] {
   let C: number[][] = [px[0]];
   while (C.length < k) {
     let far = px[0], fd = -1;
-    for (const p of px) {
+    for (let pi = 0; pi < px.length; pi++) {
+      const p = px[pi];
       let d = Infinity;
-      for (const c of C) d = Math.min(d, d2(c, p));
+      for (let ci = 0; ci < C.length; ci++) {
+        const c = C[ci];
+        const dd = 0.3 * (c[0] - p[0]) ** 2 + 0.59 * (c[1] - p[1]) ** 2 + 0.11 * (c[2] - p[2]) ** 2;
+        if (dd < d) d = dd;
+      }
       if (d > fd) (fd = d), (far = p);
     }
     if (fd < 40) break;
     C.push(far);
   }
+  const nK = colors.length;
   for (let it = 0; it < 12; it++) {
     const sum = C.map(() => [0, 0, 0, 0]);
-    colors.forEach((p, j) => {
+    for (let j = 0; j < nK; j++) {
+      const p = colors[j];
       let bi = 0, bd = Infinity;
-      C.forEach((c, i) => {
-        const d = d2(c, p);
+      for (let i = 0; i < C.length; i++) {
+        const c = C[i];
+        const d = 0.3 * (c[0] - p[0]) ** 2 + 0.59 * (c[1] - p[1]) ** 2 + 0.11 * (c[2] - p[2]) ** 2;
         if (d < bd) (bd = d), (bi = i);
-      });
+      }
       const w = weights[j];
       sum[bi][0] += p[0] * w;
       sum[bi][1] += p[1] * w;
       sum[bi][2] += p[2] * w;
       sum[bi][3] += w;
-    });
+    }
     C = sum.filter((s) => s[3] > total * 0.004).map((s) => [s[0] / s[3], s[1] / s[3], s[2] / s[3]]);
   }
   // merge near twins
   for (let merged = true; merged; ) {
     merged = false;
     for (let i = 0; i < C.length && !merged; i++)
-      for (let j = i + 1; j < C.length && !merged; j++)
-        if (d2(C[i], C[j]) < 260) {
+      for (let j = i + 1; j < C.length && !merged; j++) {
+        const di = 0.3 * (C[i][0] - C[j][0]) ** 2 + 0.59 * (C[i][1] - C[j][1]) ** 2 + 0.11 * (C[i][2] - C[j][2]) ** 2;
+        if (di < 260) {
           C[i] = C[i].map((v, q) => (v + C[j][q]) / 2);
           C.splice(j, 1);
           merged = true;
         }
+      }
   }
   return C.map((c) => c.map(Math.round) as RGB);
 }
